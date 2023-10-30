@@ -23,7 +23,7 @@ import (
 	// hex.EncodeToString(...) is useful for converting []byte to string
 
 	// Useful for string manipulation
-	"strings"
+	// "strings"
 
 	// Useful for formatting strings (e.g. `fmt.Sprintf`).
 	"fmt"
@@ -109,58 +109,494 @@ func someUsefulThings() {
 // A Go struct is like a Python or Java class - it can have attributes
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
-	Username string
+	Username              string
+	PasswordHash          []byte
+	PublicKey             userlib.PKEEncKey
+	PrivateKey            userlib.PKEDecKey
+	PublicVerificationKey userlib.DSVerifyKey
+	PrivateSignKey        userlib.DSSignKey
+	Namespace             map[string]FileMetadataNS
+	ShareStructs          map[string][]interface{}
+}
 
-	// You can add other attributes here if you want! But note that in order for attributes to
-	// be included when this struct is serialized to/from JSON, they must be capitalized.
-	// On the flipside, if you have an attribute that you want to be able to access from
-	// this struct's methods, but you DON'T want that value to be included in the serialized value
-	// of this struct that's stored in datastore, then you can use a "private" variable (e.g. one that
-	// begins with a lowercase letter).
+type StoredUserData struct {
+	EncryptedUser        []byte
+	SignedEncryptedUser  []byte
+	Username             string
+	HashedSerializedUser []byte
+}
+
+type FileMetadataNS struct {
+	UUIDStart    userlib.UUID
+	SymKey       []byte
+	HMACKeyFiles []byte
+	HMACKeyNodes []byte
+}
+
+type File struct {
+	Filename string
+	Content  []byte
+	Owner    userlib.UUID
+}
+
+type StoredFileData struct {
+	EncryptedFile     []byte
+	EncryptedFileHMAC []byte
+}
+
+type LinkedListNode struct {
+	SerializedUUIDPair     []byte
+	SerializedUUIDPairHMAC []byte
+}
+
+type NodeUUIDPair struct {
+	FileUUID     userlib.UUID
+	NextNodeUUID *userlib.UUID
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
+	if username == "" {
+		return nil, errors.New("username is empty")
+	}
 	var userdata User
 	userdata.Username = username
+
+	usernameBytes, err := json.Marshal(username)
+	if err != nil {
+		return nil, err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return nil, err
+	}
+
+	_, exists := userlib.DatastoreGet(usernameUUID)
+	if exists {
+		return nil, errors.New("user already exists")
+	}
+
+	passwordBytes, err := json.Marshal(password)
+	if err != nil {
+		return nil, err
+	}
+
+	passwordHash := userlib.Argon2Key(passwordBytes, usernameBytes, 16)
+	userdata.PasswordHash = passwordHash
+
+	publicKey, privateKey, err := userlib.PKEKeyGen()
+	if err != nil {
+		return nil, err
+	}
+	userdata.PublicKey = publicKey
+	userdata.PrivateKey = privateKey
+
+	privateSignKey, publicVerificationKey, err := userlib.DSKeyGen()
+	if err != nil {
+		return nil, err
+	}
+	userdata.PublicVerificationKey = publicVerificationKey
+	userdata.PrivateSignKey = privateSignKey
+
+	namespace := make(map[string]FileMetadataNS)
+	userdata.Namespace = namespace
+
+	shareStructs := make(map[string][]interface{})
+	userdata.ShareStructs = shareStructs
+
+	serializedUser, err := json.Marshal(userdata)
+	if err != nil {
+		return nil, err
+	}
+
+	iv := userlib.RandomBytes(16)
+	encryptedUser := userlib.SymEnc(passwordHash, iv, serializedUser)
+
+	signedEncryptedUser, err := userlib.DSSign(privateSignKey, encryptedUser)
+	if err != nil {
+		return nil, err
+	}
+
+	hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
+
+	userdataToStore := StoredUserData{
+		EncryptedUser:        encryptedUser,
+		SignedEncryptedUser:  signedEncryptedUser,
+		Username:             username,
+		HashedSerializedUser: hashedSerializedUser,
+	}
+
+	serializedUserdataToStore, err := json.Marshal(userdataToStore)
+	if err != nil {
+		return nil, err
+	}
+	userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
+
+	err = userlib.KeystoreSet(username+"PK", publicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	err = userlib.KeystoreSet(username+"DS", publicVerificationKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return &userdata, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
+	usernameBytes, err := json.Marshal(username)
+	if err != nil {
+		return nil, err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return nil, err
+	}
+
+	storedUserdataBytes, exists := userlib.DatastoreGet(usernameUUID)
+	if !exists {
+		return nil, errors.New("user doesn't exist")
+	}
+
+	var storedUserData StoredUserData
+	err = json.Unmarshal(storedUserdataBytes, &storedUserData)
+	if err != nil {
+		return nil, err
+	}
+
+	publicVerificationKey, exists := userlib.KeystoreGet(username + "DS")
+	if !exists {
+		return nil, errors.New("verification key not found")
+	}
+
+	err = userlib.DSVerify(publicVerificationKey, storedUserData.EncryptedUser, storedUserData.SignedEncryptedUser)
+	if err != nil {
+		return nil, errors.New("encryption of the serialized user struct has been tampered with")
+	}
+
+	passwordBytes, err := json.Marshal(password)
+	if err != nil {
+		return nil, err
+	}
+	passwordHash := userlib.Argon2Key(passwordBytes, usernameBytes, 16)
+
+	decryptedUser := userlib.SymDec(passwordHash, storedUserData.EncryptedUser)
+
+	hashedDecryptedUser := userlib.Argon2Key(decryptedUser, []byte("fixedSaltForPasswordVerification"), 16)
+	if !userlib.HMACEqual(hashedDecryptedUser, storedUserData.HashedSerializedUser) {
+		return nil, errors.New("incorrect password")
+	}
+
 	var userdata User
-	userdataptr = &userdata
-	return userdataptr, nil
+	err = json.Unmarshal(decryptedUser, &userdata)
+	if err != nil {
+		return nil, err
+	}
+
+	newUserdata := User{
+		Username:              userdata.Username,
+		PasswordHash:          userdata.PasswordHash,
+		PublicKey:             userdata.PublicKey,
+		PrivateKey:            userdata.PrivateKey,
+		PublicVerificationKey: userdata.PublicVerificationKey,
+		PrivateSignKey:        userdata.PrivateSignKey,
+		Namespace:             userdata.Namespace,
+		ShareStructs:          userdata.ShareStructs,
+	}
+
+	return &newUserdata, nil
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	// storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	//if err != nil {
+	//	return err
+	//}
+	//contentBytes, err := json.Marshal(content)
+	//if err != nil {
+	//	return err
+	//}
+	//userlib.DatastoreSet(storageKey, contentBytes)
+	//return
+
+	usernameBytes, err := json.Marshal(userdata.Username)
 	if err != nil {
 		return err
 	}
-	contentBytes, err := json.Marshal(content)
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
 	if err != nil {
 		return err
 	}
-	userlib.DatastoreSet(storageKey, contentBytes)
-	return
+
+	fileData := File{
+		Filename: filename,
+		Content:  content,
+		Owner:    usernameUUID,
+	}
+
+	fileDataBytes, err := json.Marshal(fileData)
+	if err != nil {
+		return err
+	}
+
+	fileEncKey := userlib.RandomBytes(16)
+	fileIV := userlib.RandomBytes(16)
+	encryptedFileData := userlib.SymEnc(fileEncKey, fileIV, fileDataBytes)
+
+	fileHMACKey := userlib.RandomBytes(16)
+	encryptedFileHMACValue, err := userlib.HMACEval(fileHMACKey, encryptedFileData)
+	if err != nil {
+		return err
+	}
+
+	fileDataToStore := StoredFileData{
+		EncryptedFile:     encryptedFileData,
+		EncryptedFileHMAC: encryptedFileHMACValue,
+	}
+	fileDataToStoreBytes, err := json.Marshal(fileDataToStore)
+	if err != nil {
+		return err
+	}
+	fileUUID := uuid.New()
+	userlib.DatastoreSet(fileUUID, fileDataToStoreBytes)
+
+	nodeUUIDPair := NodeUUIDPair{
+		FileUUID:     fileUUID,
+		NextNodeUUID: nil,
+	}
+	nodeUUIDPairBytes, err := json.Marshal(nodeUUIDPair)
+	if err != nil {
+		return err
+	}
+
+	nodeHMACKey := userlib.RandomBytes(16)
+	nodeUUIDPairHMAC, err := userlib.HMACEval(nodeHMACKey, nodeUUIDPairBytes)
+	if err != nil {
+		return err
+	}
+
+	node := LinkedListNode{
+		SerializedUUIDPair:     nodeUUIDPairBytes,
+		SerializedUUIDPairHMAC: nodeUUIDPairHMAC,
+	}
+	nodeBytes, err := json.Marshal(node)
+	if err != nil {
+		return err
+	}
+
+	fileMetadata, exists := userdata.Namespace[filename]
+	if !exists {
+		nodeUUID := uuid.New()
+		userlib.DatastoreSet(nodeUUID, nodeBytes)
+
+		fileMetadata := FileMetadataNS{
+			UUIDStart:    nodeUUID,
+			SymKey:       fileEncKey,
+			HMACKeyFiles: fileHMACKey,
+			HMACKeyNodes: nodeHMACKey,
+		}
+		userdata.Namespace[filename] = fileMetadata
+	} else {
+		userlib.DatastoreSet(fileMetadata.UUIDStart, nodeBytes)
+		fileMetadata.SymKey = fileEncKey
+		fileMetadata.HMACKeyFiles = fileHMACKey
+		fileMetadata.HMACKeyNodes = nodeHMACKey
+	}
+
+	serializedUser, err := json.Marshal(userdata)
+	if err != nil {
+		return err
+	}
+
+	iv := userlib.RandomBytes(16)
+	encryptedUser := userlib.SymEnc(userdata.PasswordHash, iv, serializedUser)
+
+	signedEncryptedUser, err := userlib.DSSign(userdata.PrivateSignKey, encryptedUser)
+	if err != nil {
+		return err
+	}
+
+	hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
+
+	userdataToStore := StoredUserData{
+		EncryptedUser:        encryptedUser,
+		SignedEncryptedUser:  signedEncryptedUser,
+		Username:             userdata.Username,
+		HashedSerializedUser: hashedSerializedUser,
+	}
+
+	serializedUserdataToStore, err := json.Marshal(userdataToStore)
+	if err != nil {
+		return err
+	}
+	userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
+
+	return nil
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
+	usernameBytes, err := json.Marshal(userdata.Username)
+	if err != nil {
+		return err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return err
+	}
+
+	fileMetadata, ok := userdata.Namespace[filename]
+	if !ok {
+		return errors.New("filename does not exist in user's namespace")
+	}
+
+	newFileChunk := File{
+		Filename: filename,
+		Content:  content,
+		Owner:    usernameUUID,
+	}
+
+	serializedFileChunk, err := json.Marshal(newFileChunk)
+	if err != nil {
+		return err
+	}
+
+	encryptedFileChunk := userlib.SymEnc(fileMetadata.SymKey, userlib.RandomBytes(16), serializedFileChunk)
+
+	encryptedFileChunkHMACValue, err := userlib.HMACEval(fileMetadata.HMACKeyFiles, encryptedFileChunk)
+	if err != nil {
+		return err
+	}
+
+	fileChunkDataToStore := StoredFileData{
+		EncryptedFile:     encryptedFileChunk,
+		EncryptedFileHMAC: encryptedFileChunkHMACValue,
+	}
+	fileChunkDataToStoreBytes, err := json.Marshal(fileChunkDataToStore)
+	if err != nil {
+		return err
+	}
+	fileUUID := uuid.New()
+	userlib.DatastoreSet(fileUUID, fileChunkDataToStoreBytes)
+
+	storedNodeDataBytes, ok := userlib.DatastoreGet(fileMetadata.UUIDStart)
+	if !ok {
+		return errors.New("node not found in datastore")
+	}
+
+	var currNode LinkedListNode
+	err = json.Unmarshal(storedNodeDataBytes, &currNode)
+
+	expectedNodeHMAC, err := userlib.HMACEval(fileMetadata.HMACKeyNodes, currNode.SerializedUUIDPair)
+	if err != nil {
+		return err
+	}
+	if !userlib.HMACEqual(expectedNodeHMAC, currNode.SerializedUUIDPairHMAC) {
+		return errors.New("HMAC verification failed for the node")
+	}
+
+	newUUIDForCurrNode := uuid.New()
+	userlib.DatastoreSet(newUUIDForCurrNode, storedNodeDataBytes)
+
+	nodeUUIDPair := NodeUUIDPair{
+		FileUUID:     fileUUID,
+		NextNodeUUID: &newUUIDForCurrNode,
+	}
+	nodeUUIDPairBytes, err := json.Marshal(nodeUUIDPair)
+	if err != nil {
+		return err
+	}
+
+	nodeUUIDPairHMAC, err := userlib.HMACEval(fileMetadata.HMACKeyNodes, nodeUUIDPairBytes)
+	if err != nil {
+		return err
+	}
+
+	newNode := LinkedListNode{
+		SerializedUUIDPair:     nodeUUIDPairBytes,
+		SerializedUUIDPairHMAC: nodeUUIDPairHMAC,
+	}
+	newNodeBytes, err := json.Marshal(newNode)
+	if err != nil {
+		return err
+	}
+	userlib.DatastoreSet(fileMetadata.UUIDStart, newNodeBytes)
+
 	return nil
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
-	if err != nil {
-		return nil, err
+	//storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	//if err != nil {
+	//	return nil, err
+	//}
+	//dataJSON, ok := userlib.DatastoreGet(storageKey)
+	//if !ok {
+	//	return nil, errors.New(strings.ToTitle("file not found"))
+	//}
+	//err = json.Unmarshal(dataJSON, &content)
+	//return content, err
+
+	fileMetadata, exists := userdata.Namespace[filename]
+	if !exists {
+		return nil, errors.New("filename doesn't exist in the user's namespace")
 	}
-	dataJSON, ok := userlib.DatastoreGet(storageKey)
-	if !ok {
-		return nil, errors.New(strings.ToTitle("file not found"))
+
+	currentUUID := fileMetadata.UUIDStart
+	for {
+		storedNodeDataBytes, ok := userlib.DatastoreGet(currentUUID)
+		if !ok {
+			return nil, errors.New("node not found in datastore")
+		}
+
+		var node LinkedListNode
+		err = json.Unmarshal(storedNodeDataBytes, &node)
+
+		expectedNodeHMAC, err := userlib.HMACEval(fileMetadata.HMACKeyNodes, node.SerializedUUIDPair)
+		if err != nil {
+			return nil, err
+		}
+		if !userlib.HMACEqual(expectedNodeHMAC, node.SerializedUUIDPairHMAC) {
+			return nil, errors.New("HMAC verification failed for the node")
+		}
+
+		var nodeUUIDPair NodeUUIDPair
+		err = json.Unmarshal(node.SerializedUUIDPair, &nodeUUIDPair)
+
+		storedFileDataBytes, ok := userlib.DatastoreGet(nodeUUIDPair.FileUUID)
+		var storedFileData StoredFileData
+		err = json.Unmarshal(storedFileDataBytes, &storedFileData)
+
+		expectedFileHMAC, err := userlib.HMACEval(fileMetadata.HMACKeyFiles, storedFileData.EncryptedFile)
+		if err != nil {
+			return nil, err
+		}
+		if !userlib.HMACEqual(expectedFileHMAC, storedFileData.EncryptedFileHMAC) {
+			return nil, errors.New("HMAC verification failed for the file")
+		}
+
+		fileDataBytes := userlib.SymDec(fileMetadata.SymKey, storedFileData.EncryptedFile)
+		var fileData File
+		err = json.Unmarshal(fileDataBytes, &fileData)
+		if err != nil {
+			return nil, err
+		}
+
+		content = append(fileData.Content, content...)
+
+		if nodeUUIDPair.NextNodeUUID == nil {
+			break
+		}
+		currentUUID = *nodeUUIDPair.NextNodeUUID
 	}
-	err = json.Unmarshal(dataJSON, &content)
-	return content, err
+
+	return content, nil
 }
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
