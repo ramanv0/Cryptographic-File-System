@@ -143,6 +143,26 @@ type ShareStructSetValue struct {
 	ChildUUID uuid.UUID
 }
 
+type Invitation struct {
+	Filename            string
+	Sender              string
+	Receiver            string
+	Revoked             bool
+	ShareStructPairUUID uuid.UUID
+	ShareStructsSymKey  []byte
+	ShareStructsHMACKey []byte
+}
+
+type InvitationHybridPair struct {
+	EncryptedInvitation []byte
+	EncryptedSymKey     []byte
+}
+
+type StoredInvitationData struct {
+	InvitationHybridPair       []byte
+	SignedInvitationHybridPair []byte
+}
+
 type StoredUserData struct {
 	EncryptedUser        []byte
 	SignedEncryptedUser  []byte
@@ -626,7 +646,7 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
 
-	_, ok := userlib.KeystoreGet(recipientUsername + "PK")
+	recipientPK, ok := userlib.KeystoreGet(recipientUsername + "PK")
 	if !ok {
 		return uuid.Nil, errors.New("recipientUsername doesn't exist")
 	}
@@ -744,8 +764,78 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 
 	shareData.ShareStructsSet[filename] = shareStructSetValue
 	// need to store the user's share struct to datastore since modified the ShareStructsSet field!!!
+	shareDataBytes, err := json.Marshal(shareData)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	encryptedShareData := userlib.SymEnc(shareStructsValue.SymKey, userlib.RandomBytes(16), shareDataBytes)
+	encryptedShareDataHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, encryptedShareData)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	updatedShareDataToStore := StoredShareData{
+		EncryptedShareStruct:     encryptedShareData,
+		EncryptedShareStructHMAC: encryptedShareDataHMAC,
+	}
+	updatedShareDataToStoreBytes, err := json.Marshal(updatedShareDataToStore)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	userlib.DatastoreSet(shareStructsValue.ShareStructPairUUID, updatedShareDataToStoreBytes)
 
-	return
+	invite := Invitation{
+		Filename:            filename,
+		Sender:              userdata.Username,
+		Receiver:            recipientUsername,
+		Revoked:             false,
+		ShareStructPairUUID: newShareDataUUID,
+		ShareStructsSymKey:  shareStructsValue.SymKey,
+		ShareStructsHMACKey: shareStructsValue.HMACKey,
+	}
+
+	inviteBytes, err := json.Marshal(invite)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	// use hybrid encryption -> encrypt the invitation struct with a RandomBytes(16) key, encrypt the symmetric key using the recipients's public key
+	// send the symmetrically encrypted invitation struct and asymmetrically encrypted key
+	invitationSymKey := userlib.RandomBytes(16)
+	encryptedInviteBytes := userlib.SymEnc(invitationSymKey, userlib.RandomBytes(16), inviteBytes)
+	encryptedInvitationSymKey, err := userlib.PKEEnc(recipientPK, invitationSymKey)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	hybridPair := InvitationHybridPair{
+		EncryptedInvitation: encryptedInviteBytes,
+		EncryptedSymKey:     encryptedInvitationSymKey,
+	}
+
+	hybridPairBytes, err := json.Marshal(hybridPair)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	hybridPairSign, err := userlib.DSSign(userdata.PrivateSignKey, hybridPairBytes)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	inviteToStore := StoredInvitationData{
+		InvitationHybridPair:       hybridPairBytes,
+		SignedInvitationHybridPair: hybridPairSign,
+	}
+
+	inviteToStoreBytes, err := json.Marshal(inviteToStore)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	inviteUUID := uuid.New()
+	userlib.DatastoreSet(inviteUUID, inviteToStoreBytes)
+
+	return inviteUUID, nil
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
