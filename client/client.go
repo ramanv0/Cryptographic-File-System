@@ -110,6 +110,7 @@ func someUsefulThings() {
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
 	Username              string
+	Password              string
 	PasswordHash          []byte
 	PublicKey             userlib.PKEEncKey
 	PrivateKey            userlib.PKEDecKey
@@ -119,10 +120,36 @@ type User struct {
 	ShareStructs          map[string]ShareStructsValue
 }
 
+// Stored at UUID(Hash(username+ns+filename))
+type FlattenedNamespaceEntry struct {
+	EncryptedFileMetadataNS       []byte
+	SignedEncryptedFileMetadataNS []byte
+}
+
+type FlattenedNamespaceHybridPair struct {
+	EncryptedFileMetadata []byte
+	EncryptedSymKey       []byte
+}
+
+// Stored at UUID(Hash(username+sh+filename))
+type FlattenedShareStructsEntry struct {
+	EncryptedShareStructsValue       []byte
+	SignedEncryptedShareStructsValue []byte
+}
+
+type FlattenedShareStructsHybridPair struct {
+	EncryptedShareStructsValue []byte
+	EncryptedSymKey            []byte
+}
+
 type ShareStructsValue struct {
 	ShareStructPairUUID uuid.UUID
 	SymKey              []byte
 	HMACKey             []byte
+	FileUUID            uuid.UUID
+	FileSymKey          []byte
+	HMACKeyFiles        []byte
+	HMACKeyNode         []byte
 }
 
 type StoredShareData struct {
@@ -131,11 +158,22 @@ type StoredShareData struct {
 }
 
 type Share struct {
-	FileUUID uuid.UUID // only defined for owner's share struct
-	SymKey   []byte    // only defined for owner's share struct
-	// TODO: I think the hmac value for files is also needed here
-	ParentUUID      uuid.UUID
-	ShareStructsSet map[string]ShareStructSetValue
+	FileUUID     uuid.UUID
+	SymKey       []byte
+	HMACKeyFiles []byte
+	HMACKeyNode  []byte
+	ParentUUID   uuid.UUID
+	// ShareStructsSet map[string]ShareStructSetValue
+	ShareStructsSet uuid.UUID // uuid to a ShareStructsSetUUID struct
+}
+
+type ShareStructsSetUUID struct {
+	EncryptedShareStructsSet     []byte
+	EncryptedShareStructsSetHMAC []byte
+}
+
+type ShareStructSet struct {
+	ShareStructSet map[string]ShareStructSetValue
 }
 
 type ShareStructSetValue struct {
@@ -206,6 +244,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	}
 	var userdata User
 	userdata.Username = username
+	userdata.Password = password
 
 	usernameBytes, err := json.Marshal(username)
 	if err != nil {
@@ -344,6 +383,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 
 	newUserdata := User{
 		Username:              userdata.Username,
+		Password:              userdata.Password,
 		PasswordHash:          userdata.PasswordHash,
 		PublicKey:             userdata.PublicKey,
 		PrivateKey:            userdata.PrivateKey,
@@ -368,6 +408,14 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	//userlib.DatastoreSet(storageKey, contentBytes)
 	//return
 
+	mostRecentUserdata, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return errors.New("Could not retrieve most up to date user from Datastore")
+	}
+
+	userdata.Namespace = mostRecentUserdata.Namespace
+	userdata.ShareStructs = mostRecentUserdata.ShareStructs
+
 	usernameBytes, err := json.Marshal(userdata.Username)
 	if err != nil {
 		return err
@@ -376,6 +424,23 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
 	if err != nil {
 		return err
+	}
+
+	var fileEncKey []byte
+	var fileHMACKey []byte
+	var nodeHMACKey []byte
+	if fileMetadata, exists := userdata.Namespace[filename]; exists {
+		fileEncKey = fileMetadata.SymKey
+		fileHMACKey = fileMetadata.HMACKeyFiles
+		nodeHMACKey = fileMetadata.HMACKeyNodes
+	} else if shareStructsValue, exists := userdata.ShareStructs[filename]; exists {
+		fileEncKey = shareStructsValue.FileSymKey
+		fileHMACKey = shareStructsValue.HMACKeyFiles
+		nodeHMACKey = shareStructsValue.HMACKeyNode
+	} else {
+		fileEncKey = userlib.RandomBytes(16)
+		fileHMACKey = userlib.RandomBytes(16)
+		nodeHMACKey = userlib.RandomBytes(16)
 	}
 
 	fileData := File{
@@ -389,11 +454,9 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return err
 	}
 
-	fileEncKey := userlib.RandomBytes(16)
 	fileIV := userlib.RandomBytes(16)
 	encryptedFileData := userlib.SymEnc(fileEncKey, fileIV, fileDataBytes)
 
-	fileHMACKey := userlib.RandomBytes(16)
 	encryptedFileHMACValue, err := userlib.HMACEval(fileHMACKey, encryptedFileData)
 	if err != nil {
 		return err
@@ -419,7 +482,6 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return err
 	}
 
-	nodeHMACKey := userlib.RandomBytes(16)
 	nodeUUIDPairHMAC, err := userlib.HMACEval(nodeHMACKey, nodeUUIDPairBytes)
 	if err != nil {
 		return err
@@ -434,8 +496,19 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return err
 	}
 
-	fileMetadata, exists := userdata.Namespace[filename]
-	if !exists {
+	// TODO: a user with which the file is shared should be able to store (i.e. overwrite) a file that was shared with them
+	// when this is done, the symkey and HMAC keys used should be available to all users with which the file is shared
+	// this is why having a single source of truth in the owner share struct was good – when retrieving or storing, it was used...
+	if fileMetadata, exists := userdata.Namespace[filename]; exists {
+		userlib.DatastoreSet(fileMetadata.UUIDStart, nodeBytes)
+	} else if shareStructsValue, exists := userdata.ShareStructs[filename]; exists {
+		shareDataPtr, err := loadShareStruct(shareStructsValue.ShareStructPairUUID, shareStructsValue)
+		if err != nil {
+			return err
+		}
+		shareData := *shareDataPtr
+		userlib.DatastoreSet(shareData.FileUUID, nodeBytes)
+	} else {
 		nodeUUID := uuid.New()
 		userlib.DatastoreSet(nodeUUID, nodeBytes)
 
@@ -446,43 +519,96 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 			HMACKeyNodes: nodeHMACKey,
 		}
 		userdata.Namespace[filename] = fileMetadata
-	} else {
-		userlib.DatastoreSet(fileMetadata.UUIDStart, nodeBytes)
-		fileMetadata.SymKey = fileEncKey
-		fileMetadata.HMACKeyFiles = fileHMACKey
-		fileMetadata.HMACKeyNodes = nodeHMACKey
+
+		serializedUser, err := json.Marshal(userdata)
+		if err != nil {
+			return err
+		}
+
+		iv := userlib.RandomBytes(16)
+		encryptedUser := userlib.SymEnc(userdata.PasswordHash, iv, serializedUser)
+
+		signedEncryptedUser, err := userlib.DSSign(userdata.PrivateSignKey, encryptedUser)
+		if err != nil {
+			return err
+		}
+
+		hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
+
+		userdataToStore := StoredUserData{
+			EncryptedUser:        encryptedUser,
+			SignedEncryptedUser:  signedEncryptedUser,
+			Username:             userdata.Username,
+			HashedSerializedUser: hashedSerializedUser,
+		}
+
+		serializedUserdataToStore, err := json.Marshal(userdataToStore)
+		if err != nil {
+			return err
+		}
+		userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
+
+		// store flattened fileMetadataNS
+		fileMetadataBytes, err := json.Marshal(fileMetadata)
+		if err != nil {
+			return err
+		}
+
+		hybridKey := userlib.RandomBytes(16)
+		encryptedFileMetadata := userlib.SymEnc(hybridKey, userlib.RandomBytes(16), fileMetadataBytes)
+
+		encryptedHybridKey, err := userlib.PKEEnc(userdata.PublicKey, hybridKey)
+		if err != nil {
+			return err
+		}
+
+		flattenedNamespaceHybridPair := FlattenedNamespaceHybridPair{
+			EncryptedFileMetadata: encryptedFileMetadata,
+			EncryptedSymKey:       encryptedHybridKey,
+		}
+
+		flattenedNamespaceHybridPairBytes, err := json.Marshal(flattenedNamespaceHybridPair)
+		if err != nil {
+			return err
+		}
+
+		signedEncryptedFileMetadata, err := userlib.DSSign(userdata.PrivateSignKey, flattenedNamespaceHybridPairBytes)
+
+		flattenedNamespaceEntry := FlattenedNamespaceEntry{
+			EncryptedFileMetadataNS:       flattenedNamespaceHybridPairBytes,
+			SignedEncryptedFileMetadataNS: signedEncryptedFileMetadata,
+		}
+
+		flattenedNamespaceEntryBytes, err := json.Marshal(flattenedNamespaceEntry)
+		if err != nil {
+			return err
+		}
+
+		flattenedNSKeyBytes, err := json.Marshal(userdata.Username + "ns" + filename)
+		if err != nil {
+			return err
+		}
+		flattenedNSHash := userlib.Hash(flattenedNSKeyBytes)
+		flattenedNSUUID, err := uuid.FromBytes(flattenedNSHash[:16])
+		if err != nil {
+			return err
+		}
+
+		userlib.DatastoreSet(flattenedNSUUID, flattenedNamespaceEntryBytes)
 	}
-
-	serializedUser, err := json.Marshal(userdata)
-	if err != nil {
-		return err
-	}
-
-	iv := userlib.RandomBytes(16)
-	encryptedUser := userlib.SymEnc(userdata.PasswordHash, iv, serializedUser)
-
-	signedEncryptedUser, err := userlib.DSSign(userdata.PrivateSignKey, encryptedUser)
-	if err != nil {
-		return err
-	}
-
-	hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
-
-	userdataToStore := StoredUserData{
-		EncryptedUser:        encryptedUser,
-		SignedEncryptedUser:  signedEncryptedUser,
-		Username:             userdata.Username,
-		HashedSerializedUser: hashedSerializedUser,
-	}
-
-	serializedUserdataToStore, err := json.Marshal(userdataToStore)
-	if err != nil {
-		return err
-	}
-	userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
 
 	return nil
 }
+
+// required changes:
+// for all functions other than the appendToFile function, load the user struct from datastore to make sure the most recent user is being used
+// will probably need to store password in the user struct as well – just store as a field in plaintext, since the user struct is encrypted
+
+// need to address the following problem with append: since we don't pull the most updated user struct (not bandwidth efficient), the current
+// implementation doesn't work for the following: e.g. boblaptop stores a file a.txt, bobphone tries to append to a.txt.
+
+// If user is the owner: Hash username+ns+filename and convert to UUID; at this UUID store (start_uuid, signature of start_uuid)
+// If user is a shared user: Hash username+sh+filename and convert to UUID; at this UUID store (start_uuid, signature of start_uuid)
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
 	usernameBytes, err := json.Marshal(userdata.Username)
@@ -495,8 +621,54 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 		return err
 	}
 
-	fileMetadata, ok := userdata.Namespace[filename]
-	if !ok {
+	fileMetadataNSPtr, flattenedFileMetadataExists, err := getFlattenedNSEntry(userdata, filename)
+	if err != nil {
+		return err
+	}
+
+	var shareStructsValuePtr *ShareStructsValue
+	var flattenedShareStructsValueExists bool
+	if !flattenedFileMetadataExists {
+		shareStructsValuePtr, flattenedShareStructsValueExists, err = getFlattenedShareStructsEntry(userdata, filename)
+		if err != nil {
+			return err
+		}
+	}
+
+	var fileMetadata FileMetadataNS
+	if flattenedFileMetadataExists {
+		fileMetadata = *fileMetadataNSPtr
+	} else if flattenedShareStructsValueExists {
+		shareStructsValue := *shareStructsValuePtr
+		shareDataPtr, err := loadShareStruct(shareStructsValue.ShareStructPairUUID, shareStructsValue)
+		if err != nil {
+			return err
+		}
+		shareData := *shareDataPtr
+		fileMetadata = FileMetadataNS{
+			UUIDStart:    shareData.FileUUID,
+			SymKey:       shareStructsValue.FileSymKey,
+			HMACKeyFiles: shareStructsValue.HMACKeyFiles,
+			HMACKeyNodes: shareStructsValue.HMACKeyNode,
+		}
+	} else if _, ok := userdata.Namespace[filename]; ok {
+		fileMetadata = userdata.Namespace[filename]
+	} else if shareStructsValue, ok := userdata.ShareStructs[filename]; ok {
+		// since share struct contains ShareStructsSet, this will not be bandwidth efficient
+		// need to store ShareStructsSet separately on datastore (use existing keys for the share struct)
+		// this way can replace the ShareStructsSet map with a UUID (16 bytes)
+		shareDataPtr, err := loadShareStruct(shareStructsValue.ShareStructPairUUID, shareStructsValue)
+		if err != nil {
+			return err
+		}
+		shareData := *shareDataPtr
+		fileMetadata = FileMetadataNS{
+			UUIDStart:    shareData.FileUUID,
+			SymKey:       shareStructsValue.FileSymKey,
+			HMACKeyFiles: shareStructsValue.HMACKeyFiles,
+			HMACKeyNodes: shareStructsValue.HMACKeyNode,
+		}
+	} else {
 		return errors.New("filename does not exist in user's namespace")
 	}
 
@@ -575,6 +747,91 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	return nil
 }
 
+func getFlattenedNSEntry(userdata *User, filename string) (*FileMetadataNS, bool, error) {
+	flattenedNSKeyBytes, err := json.Marshal(userdata.Username + "ns" + filename)
+	if err != nil {
+		return nil, false, err
+	}
+	flattenedNSHash := userlib.Hash(flattenedNSKeyBytes)
+	flattenedNSUUID, err := uuid.FromBytes(flattenedNSHash[:16])
+	if err != nil {
+		return nil, false, err
+	}
+
+	flattenedNamespaceEntryBytes, ok := userlib.DatastoreGet(flattenedNSUUID)
+	if ok {
+		var flattenedNamespaceEntry FlattenedNamespaceEntry
+		err = json.Unmarshal(flattenedNamespaceEntryBytes, &flattenedNamespaceEntry)
+		if err != nil {
+			return nil, false, err
+		}
+
+		err = userlib.DSVerify(userdata.PublicVerificationKey, flattenedNamespaceEntry.EncryptedFileMetadataNS,
+			flattenedNamespaceEntry.SignedEncryptedFileMetadataNS)
+		if err != nil {
+			return nil, false, err
+		}
+
+		var flattenedNamespaceHybridPair FlattenedNamespaceHybridPair
+		err = json.Unmarshal(flattenedNamespaceEntry.EncryptedFileMetadataNS, &flattenedNamespaceHybridPair)
+
+		hybridKey, err := userlib.PKEDec(userdata.PrivateKey, flattenedNamespaceHybridPair.EncryptedSymKey)
+
+		namespaceEntryBytes := userlib.SymDec(hybridKey, flattenedNamespaceHybridPair.EncryptedFileMetadata)
+
+		var fileMetadataNS FileMetadataNS
+		err = json.Unmarshal(namespaceEntryBytes, &fileMetadataNS)
+		if err != nil {
+			return nil, false, err
+		}
+
+		return &fileMetadataNS, ok, nil
+	}
+
+	return nil, ok, nil
+}
+
+func getFlattenedShareStructsEntry(userdata *User, filename string) (*ShareStructsValue, bool, error) {
+	flattenedShareStructsKeyBytes, err := json.Marshal(userdata.Username + "sh" + filename)
+	if err != nil {
+		return nil, false, err
+	}
+	flattenedShareStructsHash := userlib.Hash(flattenedShareStructsKeyBytes)
+	flattenedShareStructsUUID, err := uuid.FromBytes(flattenedShareStructsHash[:16])
+	if err != nil {
+		return nil, false, err
+	}
+
+	flattenedShareStructsEntryBytes, ok := userlib.DatastoreGet(flattenedShareStructsUUID)
+	if ok {
+		var flattenedShareStructsEntry FlattenedShareStructsEntry
+		json.Unmarshal(flattenedShareStructsEntryBytes, &flattenedShareStructsEntry)
+
+		err = userlib.DSVerify(userdata.PublicVerificationKey, flattenedShareStructsEntry.EncryptedShareStructsValue,
+			flattenedShareStructsEntry.SignedEncryptedShareStructsValue)
+		if err != nil {
+			return nil, false, err
+		}
+
+		var flattenedShareStructsHybridPair FlattenedShareStructsHybridPair
+		err = json.Unmarshal(flattenedShareStructsEntry.EncryptedShareStructsValue, &flattenedShareStructsHybridPair)
+
+		hybridKey, err := userlib.PKEDec(userdata.PrivateKey, flattenedShareStructsHybridPair.EncryptedSymKey)
+
+		shareStructsEntryBytes := userlib.SymDec(hybridKey, flattenedShareStructsHybridPair.EncryptedShareStructsValue)
+
+		var shareStructsValue ShareStructsValue
+		err = json.Unmarshal(shareStructsEntryBytes, &shareStructsValue)
+		if err != nil {
+			return nil, false, err
+		}
+
+		return &shareStructsValue, ok, nil
+	}
+
+	return nil, ok, nil
+}
+
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	//storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
 	//if err != nil {
@@ -587,9 +844,32 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	//err = json.Unmarshal(dataJSON, &content)
 	//return content, err
 
-	fileMetadata, exists := userdata.Namespace[filename]
-	if !exists {
-		return nil, errors.New("filename doesn't exist in the user's namespace")
+	mostRecentUserdata, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return nil, errors.New("Could not retrieve most up to date user from Datastore")
+	}
+
+	userdata.Namespace = mostRecentUserdata.Namespace
+	userdata.ShareStructs = mostRecentUserdata.ShareStructs
+
+	var fileMetadata FileMetadataNS
+	if _, exists := userdata.Namespace[filename]; exists {
+		fileMetadata = userdata.Namespace[filename]
+	} else if _, exists := userdata.ShareStructs[filename]; exists {
+		shareStructsValue := userdata.ShareStructs[filename]
+		shareDataPtr, err := loadShareStruct(shareStructsValue.ShareStructPairUUID, shareStructsValue)
+		if err != nil {
+			return nil, err
+		}
+		shareData := *shareDataPtr
+		fileMetadata = FileMetadataNS{
+			UUIDStart:    shareData.FileUUID,
+			SymKey:       shareStructsValue.FileSymKey,
+			HMACKeyFiles: shareStructsValue.HMACKeyFiles,
+			HMACKeyNodes: shareStructsValue.HMACKeyNode,
+		}
+	} else {
+		return nil, errors.New("filename doesn't exist for the user")
 	}
 
 	currentUUID := fileMetadata.UUIDStart
@@ -646,6 +926,24 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
 
+	mostRecentUserdata, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return uuid.Nil, errors.New("Could not retrieve most up to date user from Datastore")
+	}
+
+	userdata.Namespace = mostRecentUserdata.Namespace
+	userdata.ShareStructs = mostRecentUserdata.ShareStructs
+
+	usernameBytes, err := json.Marshal(userdata.Username)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return uuid.Nil, err
+	}
+
 	recipientPK, ok := userlib.KeystoreGet(recipientUsername + "PK")
 	if !ok {
 		return uuid.Nil, errors.New("recipientUsername doesn't exist")
@@ -655,9 +953,11 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 	isShared := false
 	if _, exists := userdata.Namespace[filename]; exists {
 		isOwner = true
-	} else if _, exists := userdata.ShareStructs[filename]; exists {
+	}
+	if _, exists := userdata.ShareStructs[filename]; exists {
 		isShared = true
-	} else {
+	}
+	if !(isOwner || isShared) {
 		return uuid.Nil, errors.New("user does not have file with filename")
 	}
 
@@ -673,7 +973,10 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		}
 
 		var storedShareData StoredShareData
-		json.Unmarshal(storedShareDataBytes, &storedShareData)
+		err := json.Unmarshal(storedShareDataBytes, &storedShareData)
+		if err != nil {
+			return uuid.Nil, err
+		}
 
 		expectedShareHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, storedShareData.EncryptedShareStruct)
 		if err != nil {
@@ -684,14 +987,51 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		}
 
 		shareDataBytes := userlib.SymDec(shareStructsValue.SymKey, storedShareData.EncryptedShareStruct)
-		json.Unmarshal(shareDataBytes, &shareData)
+		err = json.Unmarshal(shareDataBytes, &shareData)
+		if err != nil {
+			return uuid.Nil, err
+		}
 	} else {
+		shareEncKey := userlib.RandomBytes(16)
+		shareHMACKey := userlib.RandomBytes(16)
+
+		shareStructSet := ShareStructSet{
+			ShareStructSet: make(map[string]ShareStructSetValue),
+		}
+
+		shareStructSetBytes, err := json.Marshal(shareStructSet)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		encryptedShareStructSet := userlib.SymEnc(shareEncKey, userlib.RandomBytes(16), shareStructSetBytes)
+		encryptedShareStructSetHMAC, err := userlib.HMACEval(shareHMACKey, encryptedShareStructSet)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		shareStructsSetUUID := ShareStructsSetUUID{
+			EncryptedShareStructsSet:     encryptedShareStructSet,
+			EncryptedShareStructsSetHMAC: encryptedShareStructSetHMAC,
+		}
+
+		shareStructsSetUUIDBytes, err := json.Marshal(shareStructsSetUUID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		shareStructsSetStoreUUID := uuid.New()
+		userlib.DatastoreSet(shareStructsSetStoreUUID, shareStructsSetUUIDBytes)
+
 		fileMetadata := userdata.Namespace[filename]
 		shareData = Share{
-			FileUUID:        fileMetadata.UUIDStart,
-			SymKey:          fileMetadata.SymKey,
-			ParentUUID:      uuid.Nil,
-			ShareStructsSet: make(map[string]ShareStructSetValue),
+			FileUUID:     fileMetadata.UUIDStart,
+			SymKey:       fileMetadata.SymKey,
+			HMACKeyFiles: fileMetadata.HMACKeyFiles,
+			HMACKeyNode:  fileMetadata.HMACKeyNodes,
+			ParentUUID:   uuid.Nil,
+			// ShareStructsSet: make(map[string]ShareStructSetValue),
+			ShareStructsSet: shareStructsSetStoreUUID,
 		}
 
 		shareDataBytes, err := json.Marshal(shareData)
@@ -699,10 +1039,8 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 			return uuid.Nil, err
 		}
 
-		shareEncKey := userlib.RandomBytes(16)
 		encryptedShareData := userlib.SymEnc(shareEncKey, userlib.RandomBytes(16), shareDataBytes)
 
-		shareHMACKey := userlib.RandomBytes(16)
 		encryptedShareHMACValue, err := userlib.HMACEval(shareHMACKey, encryptedShareData)
 		if err != nil {
 			return uuid.Nil, err
@@ -724,15 +1062,80 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 			ShareStructPairUUID: shareUUID,
 			SymKey:              shareEncKey,
 			HMACKey:             shareHMACKey,
+			FileUUID:            fileMetadata.UUIDStart,
+			FileSymKey:          fileMetadata.SymKey,
+			HMACKeyFiles:        fileMetadata.HMACKeyFiles,
+			HMACKeyNode:         fileMetadata.HMACKeyNodes,
 		}
 		userdata.ShareStructs[filename] = shareStructsValue
+
+		serializedUser, err := json.Marshal(userdata)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		iv := userlib.RandomBytes(16)
+		encryptedUser := userlib.SymEnc(userdata.PasswordHash, iv, serializedUser)
+
+		signedEncryptedUser, err := userlib.DSSign(userdata.PrivateSignKey, encryptedUser)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
+
+		userdataToStore := StoredUserData{
+			EncryptedUser:        encryptedUser,
+			SignedEncryptedUser:  signedEncryptedUser,
+			Username:             userdata.Username,
+			HashedSerializedUser: hashedSerializedUser,
+		}
+
+		serializedUserdataToStore, err := json.Marshal(userdataToStore)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
 	}
 
+	// CHILD SHARE DATA NEED FILEUUID, SYMKEY, HMAC KEYS IN ORDER TO BE ABLE TO APPEND TO THE FILE WITH EFFICIENT BANDWIDTH!!!
+	// THIS WOULD MEAN THAT THE FOR LOOPS UP TO THE OWNER SHARE STRUCT ARE NOT NEEDED
+
+	childShareStructSet := ShareStructSet{
+		ShareStructSet: make(map[string]ShareStructSetValue),
+	}
+
+	childShareStructSetBytes, err := json.Marshal(childShareStructSet)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	childEncryptedShareStructSet := userlib.SymEnc(shareStructsValue.SymKey, userlib.RandomBytes(16), childShareStructSetBytes)
+	childEncryptedShareStructSetHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, childEncryptedShareStructSet)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	childShareStructsSetUUID := ShareStructsSetUUID{
+		EncryptedShareStructsSet:     childEncryptedShareStructSet,
+		EncryptedShareStructsSetHMAC: childEncryptedShareStructSetHMAC,
+	}
+
+	childShareStructsSetUUIDBytes, err := json.Marshal(childShareStructsSetUUID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	childShareStructsSetStoreUUID := uuid.New()
+	userlib.DatastoreSet(childShareStructsSetStoreUUID, childShareStructsSetUUIDBytes)
+
 	shareDataForInvite := Share{
-		FileUUID:        uuid.Nil,
-		SymKey:          nil,
+		FileUUID:        shareData.FileUUID,
+		SymKey:          shareStructsValue.FileSymKey,
+		HMACKeyFiles:    shareStructsValue.HMACKeyFiles,
+		HMACKeyNode:     shareStructsValue.HMACKeyNode,
 		ParentUUID:      shareUUID,
-		ShareStructsSet: make(map[string]ShareStructSetValue),
+		ShareStructsSet: childShareStructsSetStoreUUID,
 	}
 
 	shareDataForInviteBytes, err := json.Marshal(shareDataForInvite)
@@ -762,26 +1165,18 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		ChildUUID: newShareDataUUID,
 	}
 
-	shareData.ShareStructsSet[filename] = shareStructSetValue
-	// need to store the user's share struct to datastore since modified the ShareStructsSet field!!!
-	shareDataBytes, err := json.Marshal(shareData)
+	shareStructsSetPtr, err := getShareStructSet(shareStructsValue, shareData)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	encryptedShareData := userlib.SymEnc(shareStructsValue.SymKey, userlib.RandomBytes(16), shareDataBytes)
-	encryptedShareDataHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, encryptedShareData)
+	shareStructsSet := *shareStructsSetPtr
+
+	shareStructsSet.ShareStructSet[recipientUsername] = shareStructSetValue
+
+	err = storeShareStructSet(shareStructsValue, shareData.ShareStructsSet, shareStructsSet)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	updatedShareDataToStore := StoredShareData{
-		EncryptedShareStruct:     encryptedShareData,
-		EncryptedShareStructHMAC: encryptedShareDataHMAC,
-	}
-	updatedShareDataToStoreBytes, err := json.Marshal(updatedShareDataToStore)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	userlib.DatastoreSet(shareStructsValue.ShareStructPairUUID, updatedShareDataToStoreBytes)
 
 	invite := Invitation{
 		Filename:            filename,
@@ -839,9 +1234,516 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
+	mostRecentUserdata, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return errors.New("Could not retrieve most up to date user from Datastore")
+	}
+
+	userdata.Namespace = mostRecentUserdata.Namespace
+	userdata.ShareStructs = mostRecentUserdata.ShareStructs
+
+	if _, exists := userdata.Namespace[filename]; exists {
+		return errors.New("User already has the file (owner)")
+	} else if _, exists := userdata.ShareStructs[filename]; exists {
+		return errors.New("User already has the file (shared)")
+	}
+
+	storedInviteBytes, ok := userlib.DatastoreGet(invitationPtr)
+	if !ok {
+		return errors.New("Invite doesn't exist")
+	}
+
+	var storedInvitationData StoredInvitationData
+	err = json.Unmarshal(storedInviteBytes, &storedInvitationData)
+	if err != nil {
+		return err
+	}
+
+	senderVerifyKey, ok := userlib.KeystoreGet(senderUsername + "DS")
+	if !ok {
+		return errors.New("Sender doesn't have verify key in Keystore")
+	}
+
+	err = userlib.DSVerify(senderVerifyKey, storedInvitationData.InvitationHybridPair, storedInvitationData.SignedInvitationHybridPair)
+	if err != nil {
+		return err
+	}
+
+	var invitationHybridPair InvitationHybridPair
+	err = json.Unmarshal(storedInvitationData.InvitationHybridPair, &invitationHybridPair)
+	if err != nil {
+		return err
+	}
+
+	symKey, err := userlib.PKEDec(userdata.PrivateKey, invitationHybridPair.EncryptedSymKey)
+	if err != nil {
+		return err
+	}
+
+	inviteBytes := userlib.SymDec(symKey, invitationHybridPair.EncryptedInvitation)
+
+	var invite Invitation
+	err = json.Unmarshal(inviteBytes, &invite)
+	if err != nil {
+		return err
+	}
+
+	if invite.Revoked {
+		return errors.New("Invite has been revoked")
+	}
+
+	storedShareDataBytes, ok := userlib.DatastoreGet(invite.ShareStructPairUUID)
+	if !ok {
+		return errors.New("Share data not in datstore")
+	}
+
+	var storedShareData StoredShareData
+	err = json.Unmarshal(storedShareDataBytes, &storedShareData)
+	if err != nil {
+		return err
+	}
+
+	storedShareDataHMAC, err := userlib.HMACEval(invite.ShareStructsHMACKey, storedShareData.EncryptedShareStruct)
+	if err != nil {
+		return err
+	}
+	ok = userlib.HMACEqual(storedShareDataHMAC, storedShareData.EncryptedShareStructHMAC)
+	if !ok {
+		return errors.New("HMAC verification failed for the store share data")
+	}
+
+	shareBytes := userlib.SymDec(invite.ShareStructsSymKey, storedShareData.EncryptedShareStruct)
+	var share Share
+	err = json.Unmarshal(shareBytes, &share)
+	if err != nil {
+		return err
+	}
+
+	shareStructsValue := ShareStructsValue{
+		ShareStructPairUUID: invite.ShareStructPairUUID,
+		SymKey:              invite.ShareStructsSymKey,
+		HMACKey:             invite.ShareStructsHMACKey,
+		FileUUID:            share.FileUUID,
+		FileSymKey:          share.SymKey,
+		HMACKeyFiles:        share.HMACKeyFiles,
+		HMACKeyNode:         share.HMACKeyNode,
+	}
+
+	userdata.ShareStructs[filename] = shareStructsValue
+
+	usernameBytes, err := json.Marshal(userdata.Username)
+	if err != nil {
+		return err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return err
+	}
+
+	serializedUser, err := json.Marshal(userdata)
+	if err != nil {
+		return err
+	}
+
+	encryptedUser := userlib.SymEnc(userdata.PasswordHash, userlib.RandomBytes(16), serializedUser)
+
+	signedEncryptedUser, err := userlib.DSSign(userdata.PrivateSignKey, encryptedUser)
+	if err != nil {
+		return err
+	}
+
+	hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
+
+	userdataToStore := StoredUserData{
+		EncryptedUser:        encryptedUser,
+		SignedEncryptedUser:  signedEncryptedUser,
+		Username:             userdata.Username,
+		HashedSerializedUser: hashedSerializedUser,
+	}
+
+	serializedUserdataToStore, err := json.Marshal(userdataToStore)
+	if err != nil {
+		return err
+	}
+	userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
+
+	// store flattened shareStructsValue
+	shareStructsValueBytes, err := json.Marshal(shareStructsValue)
+	if err != nil {
+		return err
+	}
+
+	hybridKey := userlib.RandomBytes(16)
+	encryptedShareStructsValue := userlib.SymEnc(hybridKey, userlib.RandomBytes(16), shareStructsValueBytes)
+
+	encryptedHybridKey, err := userlib.PKEEnc(userdata.PublicKey, hybridKey)
+	if err != nil {
+		return err
+	}
+
+	flattenedShareStructsHybridPair := FlattenedShareStructsHybridPair{
+		EncryptedShareStructsValue: encryptedShareStructsValue,
+		EncryptedSymKey:            encryptedHybridKey,
+	}
+
+	flattenedShareStructsHybridPairBytes, err := json.Marshal(flattenedShareStructsHybridPair)
+	if err != nil {
+		return err
+	}
+
+	signedEncryptedShareStructsValue, err := userlib.DSSign(userdata.PrivateSignKey, flattenedShareStructsHybridPairBytes)
+
+	flattenedShareStructsEntry := FlattenedShareStructsEntry{
+		EncryptedShareStructsValue:       flattenedShareStructsHybridPairBytes,
+		SignedEncryptedShareStructsValue: signedEncryptedShareStructsValue,
+	}
+
+	flattenedShareStructsEntryBytes, err := json.Marshal(flattenedShareStructsEntry)
+	if err != nil {
+		return err
+	}
+
+	flattenedShareStructsKeyBytes, err := json.Marshal(userdata.Username + "sh" + filename)
+	if err != nil {
+		return err
+	}
+	flattenedShareStructsHash := userlib.Hash(flattenedShareStructsKeyBytes)
+	flattenedShareStructsUUID, err := uuid.FromBytes(flattenedShareStructsHash[:16])
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(flattenedShareStructsUUID, flattenedShareStructsEntryBytes)
+
 	return nil
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
+	mostRecentUserdata, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return errors.New("Could not retrieve most up to date user from Datastore")
+	}
+
+	userdata.Namespace = mostRecentUserdata.Namespace
+	userdata.ShareStructs = mostRecentUserdata.ShareStructs
+
+	if _, exists := userdata.Namespace[filename]; !exists {
+		return errors.New("User does not own the file")
+	} else if _, exists := userdata.ShareStructs[filename]; !exists {
+		return errors.New("User never shared the file")
+	}
+
+	shareStructsValue := userdata.ShareStructs[filename]
+	shareDataPtr, err := loadShareStruct(shareStructsValue.ShareStructPairUUID, shareStructsValue)
+	if err != nil {
+		return errors.New("Could not load share struct")
+	}
+	shareData := *shareDataPtr
+
+	// first get the actual ShareStructsSet, which is stored encrypted at the share.ShareStructsSet uuid
+	shareStructSetPtr, err := getShareStructSet(shareStructsValue, shareData)
+	if err != nil {
+		return err
+	}
+	shareStructSet := *shareStructSetPtr
+
+	if _, exists := shareStructSet.ShareStructSet[recipientUsername]; !exists {
+		return errors.New("recipientUsername doesn't exist in the SharedStructsSet")
+	}
+
+	recipientShareUUID := shareStructSet.ShareStructSet[recipientUsername].ChildUUID
+	userlib.DatastoreDelete(recipientShareUUID)
+
+	delete(shareStructSet.ShareStructSet, recipientUsername)
+
+	newShareStructsSetUUID := uuid.New()
+	err = storeShareStructSet(shareStructsValue, newShareStructsSetUUID, shareStructSet)
+	if err != nil {
+		return err
+	}
+
+	// need to get the start node, delete it from its curr uuid, and store it at a new uuid
+	// when going through the child share structs, update their FileUUIDs as well. Also need to change current code to always use the Share struct
+	// instead of ShareStructValues of user struct (because if we update the share struct below and use the ShareStructValues map to get the FileUUID,
+	// they will be out of sync).
+
+	newOwnerShareUUID := uuid.New()
+	for _, childShareStructSetValue := range shareStructSet.ShareStructSet {
+		storedShareDataBytes, ok := userlib.DatastoreGet(childShareStructSetValue.ChildUUID)
+		if !ok {
+			return errors.New("User doesn't have share data")
+		}
+
+		var storedShareData StoredShareData
+		err := json.Unmarshal(storedShareDataBytes, &storedShareData)
+		if err != nil {
+			return err
+		}
+
+		expectedShareHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, storedShareData.EncryptedShareStruct)
+		if err != nil {
+			return err
+		}
+		if !userlib.HMACEqual(expectedShareHMAC, storedShareData.EncryptedShareStructHMAC) {
+			return errors.New("HMAC verification failed for the share struct")
+		}
+
+		shareDataBytes := userlib.SymDec(shareStructsValue.SymKey, storedShareData.EncryptedShareStruct)
+		var childShareData Share
+		err = json.Unmarshal(shareDataBytes, &childShareData)
+		if err != nil {
+			return err
+		}
+
+		childShareData.ParentUUID = newOwnerShareUUID
+
+		newShareDataBytes, err := json.Marshal(childShareData)
+		if err != nil {
+			return err
+		}
+
+		encryptedNewShareData := userlib.SymEnc(shareStructsValue.SymKey, userlib.RandomBytes(16), newShareDataBytes)
+
+		encryptedNewShareHMACValue, err := userlib.HMACEval(shareStructsValue.HMACKey, encryptedNewShareData)
+		if err != nil {
+			return err
+		}
+
+		newShareDataToStore := StoredShareData{
+			EncryptedShareStruct:     encryptedNewShareData,
+			EncryptedShareStructHMAC: encryptedNewShareHMACValue,
+		}
+		newShareDataToStoreBytes, err := json.Marshal(newShareDataToStore)
+		if err != nil {
+			return err
+		}
+
+		userlib.DatastoreSet(childShareStructSetValue.ChildUUID, newShareDataToStoreBytes)
+	}
+
+	startNodeStructBytes, ok := userlib.DatastoreGet(shareData.FileUUID)
+	if !ok {
+		return errors.New("Start node doesn't exist in Datastore")
+	}
+	var statNodeStruct LinkedListNode
+	err = json.Unmarshal(startNodeStructBytes, &statNodeStruct)
+	if err != nil {
+		return err
+	}
+	statNodeStructHMAC, err := userlib.HMACEval(shareStructsValue.HMACKeyNode, statNodeStruct.SerializedUUIDPair)
+	if err != nil {
+		return err
+	}
+	ok = userlib.HMACEqual(statNodeStructHMAC, statNodeStruct.SerializedUUIDPairHMAC)
+	if !ok {
+		return errors.New("HMAC verification failed")
+	}
+
+	userlib.DatastoreDelete(shareData.FileUUID)
+
+	newFileUUID := uuid.New()
+
+	userlib.DatastoreSet(newFileUUID, startNodeStructBytes)
+
+	updateShareStructTree(shareStructsValue, shareData, newFileUUID)
+
+	fileMetadataNS := userdata.Namespace[filename]
+	fileMetadataNS.UUIDStart = newFileUUID
+	userdata.Namespace[filename] = fileMetadataNS
+
+	shareStructsValueOld := userdata.ShareStructs[filename]
+	shareStructsValueOld.FileUUID = newFileUUID
+	userdata.ShareStructs[filename] = shareStructsValueOld
+
+	usernameBytes, err := json.Marshal(userdata.Username)
+	if err != nil {
+		return err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return err
+	}
+
+	serializedUser, err := json.Marshal(userdata)
+	if err != nil {
+		return err
+	}
+
+	encryptedUser := userlib.SymEnc(userdata.PasswordHash, userlib.RandomBytes(16), serializedUser)
+
+	signedEncryptedUser, err := userlib.DSSign(userdata.PrivateSignKey, encryptedUser)
+	if err != nil {
+		return err
+	}
+
+	hashedSerializedUser := userlib.Argon2Key(serializedUser, []byte("fixedSaltForPasswordVerification"), 16)
+
+	userdataToStore := StoredUserData{
+		EncryptedUser:        encryptedUser,
+		SignedEncryptedUser:  signedEncryptedUser,
+		Username:             userdata.Username,
+		HashedSerializedUser: hashedSerializedUser,
+	}
+
+	serializedUserdataToStore, err := json.Marshal(userdataToStore)
+	if err != nil {
+		return err
+	}
+	userlib.DatastoreSet(usernameUUID, serializedUserdataToStore)
+
 	return nil
+}
+
+func loadShareStruct(shareStructPairUUID uuid.UUID, shareStructsValue ShareStructsValue) (*Share, error) {
+	storedShareDataBytes, ok := userlib.DatastoreGet(shareStructPairUUID)
+	if !ok {
+		return nil, errors.New("User doesn't have share data")
+	}
+
+	var storedShareData StoredShareData
+	err := json.Unmarshal(storedShareDataBytes, &storedShareData)
+	if err != nil {
+		return nil, err
+	}
+
+	expectedShareHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, storedShareData.EncryptedShareStruct)
+	if err != nil {
+		return nil, err
+	}
+	if !userlib.HMACEqual(expectedShareHMAC, storedShareData.EncryptedShareStructHMAC) {
+		return nil, errors.New("HMAC verification failed for the share struct")
+	}
+
+	shareDataBytes := userlib.SymDec(shareStructsValue.SymKey, storedShareData.EncryptedShareStruct)
+	var shareData Share
+	err = json.Unmarshal(shareDataBytes, &shareData)
+	if err != nil {
+		return nil, err
+	}
+
+	return &shareData, nil
+}
+
+func storeShareStruct(shareStructsValue ShareStructsValue, shareData Share, storeUUID uuid.UUID) error {
+	newShareDataBytes, err := json.Marshal(shareData)
+	if err != nil {
+		return err
+	}
+
+	encryptedNewShareData := userlib.SymEnc(shareStructsValue.SymKey, userlib.RandomBytes(16), newShareDataBytes)
+
+	encryptedNewShareHMACValue, err := userlib.HMACEval(shareStructsValue.HMACKey, encryptedNewShareData)
+	if err != nil {
+		return err
+	}
+
+	newShareDataToStore := StoredShareData{
+		EncryptedShareStruct:     encryptedNewShareData,
+		EncryptedShareStructHMAC: encryptedNewShareHMACValue,
+	}
+	newShareDataToStoreBytes, err := json.Marshal(newShareDataToStore)
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(storeUUID, newShareDataToStoreBytes)
+
+	return nil
+}
+
+func updateShareStructTree(shareStructsValue ShareStructsValue, shareData Share,
+	newFileUUID uuid.UUID) error {
+
+	shareData.FileUUID = newFileUUID
+	storeShareStruct(shareStructsValue, shareData, shareStructsValue.ShareStructPairUUID)
+
+	shareStructSetPtr, err := getShareStructSet(shareStructsValue, shareData)
+	if err != nil {
+		return err
+	}
+	shareStructSet := *shareStructSetPtr
+
+	for _, childShareStructSetValue := range shareStructSet.ShareStructSet {
+		childShareDataPtr, err := loadShareStruct(childShareStructSetValue.ChildUUID, shareStructsValue)
+		if err != nil {
+			return err
+		}
+		err = updateShareStructTree(shareStructsValue, *childShareDataPtr, newFileUUID)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func getShareStructSet(shareStructsValue ShareStructsValue, shareData Share) (*ShareStructSet, error) {
+	shareStructsSetUUIDBytes, ok := userlib.DatastoreGet(shareData.ShareStructsSet)
+	if !ok {
+		return nil, errors.New("shareStructsSetUUID doesn't exist in the Datastore")
+	}
+	var shareStructsSetUUID ShareStructsSetUUID
+	json.Unmarshal(shareStructsSetUUIDBytes, &shareStructsSetUUID)
+
+	shareStructsSetUUIDHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, shareStructsSetUUID.EncryptedShareStructsSet)
+	if err != nil {
+		return nil, errors.New("HMACEval errored")
+	}
+
+	ok = userlib.HMACEqual(shareStructsSetUUIDHMAC, shareStructsSetUUID.EncryptedShareStructsSetHMAC)
+	if !ok {
+		return nil, errors.New("HMAC verification failed on shareStructsSetUUID")
+	}
+
+	shareStructsSetBytes := userlib.SymDec(shareStructsValue.SymKey, shareStructsSetUUID.EncryptedShareStructsSet)
+	var shareStructsSet ShareStructSet
+	err = json.Unmarshal(shareStructsSetBytes, &shareStructsSet)
+	if err != nil {
+		return nil, errors.New("shareStructsSetBytes unmarshaling failed")
+	}
+
+	return &shareStructsSet, nil
+}
+
+func storeShareStructSet(shareStructsValue ShareStructsValue, storeUUID uuid.UUID, shareStructsSet ShareStructSet) error {
+	newShareStructsSetBytes, err := json.Marshal(shareStructsSet)
+	if err != nil {
+		return errors.New("shareStructsSetBytes unmarshaling failed")
+	}
+
+	encryptedNewShareStructsSet := userlib.SymEnc(shareStructsValue.SymKey, userlib.RandomBytes(16), newShareStructsSetBytes)
+	encryptedNewShareStructsSetHMAC, err := userlib.HMACEval(shareStructsValue.HMACKey, encryptedNewShareStructsSet)
+	if err != nil {
+		return errors.New("HMACEval errored")
+	}
+
+	newShareStructsSetUUID := ShareStructsSetUUID{
+		EncryptedShareStructsSet:     encryptedNewShareStructsSet,
+		EncryptedShareStructsSetHMAC: encryptedNewShareStructsSetHMAC,
+	}
+
+	newShareStructsSetUUIDBytes, err := json.Marshal(newShareStructsSetUUID)
+	if err != nil {
+		return errors.New("newShareStructsSetUUIDBytes unmarshaling failed")
+	}
+
+	userlib.DatastoreSet(storeUUID, newShareStructsSetUUIDBytes)
+
+	return nil
+}
+
+func GetUserUUID(userdata *User, username string) (uuid.UUID, error) {
+	usernameBytes, err := json.Marshal(userdata.Username)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	usernameHash := userlib.Hash(usernameBytes)
+	usernameUUID, err := uuid.FromBytes(usernameHash[:16])
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	return usernameUUID, nil
 }
