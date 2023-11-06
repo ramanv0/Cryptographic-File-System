@@ -8,6 +8,8 @@ import (
 	// about unused imports.
 	_ "encoding/hex"
 	_ "errors"
+
+	"strconv"
 	_ "strconv"
 	_ "strings"
 	"testing"
@@ -434,5 +436,212 @@ var _ = Describe("Client Tests", func() {
 			_, err := alice.CreateInvitation(aliceFile, "bob")
 			Expect(err).ToNot(BeNil())
 		})
+
+		Specify("My Test: Revoke before accepting", func() {
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			bob.StoreFile(bobFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := bob.CreateInvitation(bobFile, "alice")
+			Expect(err).To(BeNil())
+
+			bob.RevokeAccess(bobFile, "alice")
+
+			err = alice.AcceptInvitation("bob", invite, aliceFile)
+			Expect(err).ToNot(BeNil())
+
+			err = alice.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			_, err = alice.LoadFile(aliceFile)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: Test append bandwidth", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with total file size", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			largeContent := ""
+			for i := 0; i < 10000; i++ {
+				largeContent += "AAAAA"
+			}
+
+			alice.StoreFile(aliceFile, []byte(largeContent))
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with number of files", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			for i := 0; i < 100; i++ {
+				alice.StoreFile(aliceFile+strconv.Itoa(i), []byte("A"))
+			}
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile+"0", []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with length of the filename", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			longFilename := "" // 10000 bytes
+			for i := 0; i < 1000; i++ {
+				longFilename += "AAAAAAAAAA"
+			}
+
+			alice.StoreFile(longFilename, []byte(contentOne))
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(longFilename, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with the size of the previous apped", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			largePrevAppend := "" // 10000 bytes
+			for i := 0; i < 1000; i++ {
+				largePrevAppend += "AAAAAAAAAA"
+			}
+
+			alice.AppendToFile(aliceFile, []byte(largePrevAppend))
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with length of the username", func() {
+			longUsername := "" // 10000 bytes
+			for i := 0; i < 1000; i++ {
+				longUsername += "AAAAAAAAAA"
+			}
+
+			alice, err = client.InitUser(longUsername, defaultPassword)
+			Expect(err).To(BeNil())
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with length of the password", func() {
+			longPassword := "" // 10000 bytes
+			for i := 0; i < 1000; i++ {
+				longPassword += "AAAAAAAAAA"
+			}
+
+			alice, err = client.InitUser("alice", longPassword)
+			Expect(err).To(BeNil())
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
+		Specify("My Test: Append shouldn't scale with the number of users the file is shared with", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			alice.StoreFile(aliceFile, []byte(contentOne))
+
+			garbageStr := ""
+			for i := 0; i < 100; i++ {
+				garbageStr += "A"
+			}
+
+			for i := 0; i < 100; i++ {
+				newUser, err := client.InitUser("user"+strconv.Itoa(i), defaultPassword)
+				Expect(err).To(BeNil())
+				invite, err := alice.CreateInvitation(aliceFile, "user"+strconv.Itoa(i))
+				Expect(err).To(BeNil())
+				newUser.AcceptInvitation("alice", invite, "file"+strconv.Itoa(i))
+			}
+
+			before := userlib.DatastoreGetBandwidth()
+			alice.AppendToFile(aliceFile, []byte(garbageStr))
+			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+		})
+
 	})
 })

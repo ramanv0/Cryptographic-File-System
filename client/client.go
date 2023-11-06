@@ -216,9 +216,8 @@ type FileMetadataNS struct {
 }
 
 type File struct {
-	Filename string
-	Content  []byte
-	Owner    uuid.UUID
+	Content []byte
+	Owner   uuid.UUID
 }
 
 type StoredFileData struct {
@@ -444,9 +443,8 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	}
 
 	fileData := File{
-		Filename: filename,
-		Content:  content,
-		Owner:    usernameUUID,
+		Content: content,
+		Owner:   usernameUUID,
 	}
 
 	fileDataBytes, err := json.Marshal(fileData)
@@ -673,9 +671,8 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	}
 
 	newFileChunk := File{
-		Filename: filename,
-		Content:  content,
-		Owner:    usernameUUID,
+		Content: content,
+		Owner:   usernameUUID,
 	}
 
 	serializedFileChunk, err := json.Marshal(newFileChunk)
