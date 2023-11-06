@@ -643,5 +643,44 @@ var _ = Describe("Client Tests", func() {
 			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
 		})
 
+		Specify("My Test: InitUser when a user with the same username exists", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: InitUser when an empty username is provided", func() {
+			alice, err = client.InitUser("", defaultPassword)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: GetUser when there is no initialized user for the given username.", func() {
+			_, err := client.GetUser("alice", defaultPassword)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: GetUser when the user credentials are invalid.", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			_, err := client.GetUser("alice", defaultPassword+"x")
+			Expect(err).ToNot(BeNil())
+
+			_, err = client.GetUser("alicex", defaultPassword)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: GetUser when the User struct cannot be obtained due to malicious action.", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+
+			datastoreMap := userlib.DatastoreGetMap()
+			for uuidKey, _ := range datastoreMap {
+				userlib.DatastoreSet(uuidKey, []byte("Overwritten with garbage bytes!!!"))
+			}
+
+			_, err = client.GetUser("alice", defaultPassword)
+			Expect(err).ToNot(BeNil())
+		})
+
 	})
 })
