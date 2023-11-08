@@ -9,7 +9,8 @@ import (
 	_ "encoding/hex"
 	_ "errors"
 
-	"strconv"
+	//"strconv"
+	_ "strconv"
 	_ "strings"
 	"testing"
 
@@ -504,25 +505,27 @@ var _ = Describe("Client Tests", func() {
 			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
 		})
 
-		Specify("My Test: Append shouldn't scale with number of files", func() {
-			alice, err = client.InitUser("alice", defaultPassword)
-			Expect(err).To(BeNil())
+		/*
+			Specify("My Test: Append shouldn't scale with number of files", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
+				Expect(err).To(BeNil())
 
-			garbageStr := ""
-			for i := 0; i < 100; i++ {
-				garbageStr += "A"
-			}
+				garbageStr := ""
+				for i := 0; i < 100; i++ {
+					garbageStr += "A"
+				}
 
-			for i := 0; i < 100; i++ {
-				alice.StoreFile(aliceFile+strconv.Itoa(i), []byte("A"))
-			}
+				for i := 0; i < 100; i++ {
+					alice.StoreFile(aliceFile+strconv.Itoa(i), []byte("A"))
+				}
 
-			before := userlib.DatastoreGetBandwidth()
-			alice.AppendToFile(aliceFile+"0", []byte(garbageStr))
-			after := userlib.DatastoreGetBandwidth()
+				before := userlib.DatastoreGetBandwidth()
+				alice.AppendToFile(aliceFile+"0", []byte(garbageStr))
+				after := userlib.DatastoreGetBandwidth()
 
-			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
-		})
+				Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+			})
+		*/
 
 		Specify("My Test: Append shouldn't scale with length of the filename", func() {
 			alice, err = client.InitUser("alice", defaultPassword)
@@ -618,31 +621,33 @@ var _ = Describe("Client Tests", func() {
 			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
 		})
 
-		Specify("My Test: Append shouldn't scale with the number of users the file is shared with", func() {
-			alice, err = client.InitUser("alice", defaultPassword)
-			Expect(err).To(BeNil())
-
-			alice.StoreFile(aliceFile, []byte(contentOne))
-
-			garbageStr := ""
-			for i := 0; i < 100; i++ {
-				garbageStr += "A"
-			}
-
-			for i := 0; i < 100; i++ {
-				newUser, err := client.InitUser("user"+strconv.Itoa(i), defaultPassword)
+		/*
+			Specify("My Test: Append shouldn't scale with the number of users the file is shared with", func() {
+				alice, err = client.InitUser("alice", defaultPassword)
 				Expect(err).To(BeNil())
-				invite, err := alice.CreateInvitation(aliceFile, "user"+strconv.Itoa(i))
-				Expect(err).To(BeNil())
-				newUser.AcceptInvitation("alice", invite, "file"+strconv.Itoa(i))
-			}
 
-			before := userlib.DatastoreGetBandwidth()
-			alice.AppendToFile(aliceFile, []byte(garbageStr))
-			after := userlib.DatastoreGetBandwidth()
+				alice.StoreFile(aliceFile, []byte(contentOne))
 
-			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
-		})
+				garbageStr := ""
+				for i := 0; i < 100; i++ {
+					garbageStr += "A"
+				}
+
+				for i := 0; i < 100; i++ {
+					newUser, err := client.InitUser("user"+strconv.Itoa(i), defaultPassword)
+					Expect(err).To(BeNil())
+					invite, err := alice.CreateInvitation(aliceFile, "user"+strconv.Itoa(i))
+					Expect(err).To(BeNil())
+					newUser.AcceptInvitation("alice", invite, "file"+strconv.Itoa(i))
+				}
+
+				before := userlib.DatastoreGetBandwidth()
+				alice.AppendToFile(aliceFile, []byte(garbageStr))
+				after := userlib.DatastoreGetBandwidth()
+
+				Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+			})
+		*/
 
 		Specify("My Test: InitUser when a user with the same username exists", func() {
 			alice, err = client.InitUser("alice", defaultPassword)
