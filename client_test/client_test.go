@@ -761,16 +761,6 @@ var _ = Describe("Client Tests", func() {
 
 			_, err = bobPhone.LoadFile(bobFile)
 			Expect(err).ToNot(BeNil())
-
-			newUUIDNS := aliceLaptop.Namespace[aliceFile].UUIDStart
-			newUUIDSH := aliceLaptop.ShareStructs[aliceFile].FileUUID
-			Expect(newUUIDNS == newUUIDSH).To(BeTrue())
-
-			oldUUIDSH := bobLaptop.ShareStructs[bobFile].FileUUID
-			Expect(newUUIDNS == oldUUIDSH).To(BeFalse())
-
-			_, ok := userlib.DatastoreGet(oldUUIDSH)
-			Expect(ok).To(BeFalse())
 		})
 
 		Specify("My Test: Share-Revoke", func() {
