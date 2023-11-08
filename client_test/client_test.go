@@ -56,13 +56,15 @@ var _ = Describe("Client Tests", func() {
 	var eve *client.User
 	var frank *client.User
 	var grace *client.User
-	// var horace *client.User
-	// var ira *client.User
+	var horace *client.User
+	var ira *client.User
 
 	// These declarations may be useful for multi-session testing.
 	var alicePhone *client.User
 	var aliceLaptop *client.User
 	var aliceDesktop *client.User
+	var bobPhone *client.User
+	var bobLaptop *client.User
 
 	var err error
 
@@ -74,8 +76,8 @@ var _ = Describe("Client Tests", func() {
 	eveFile := "eveFile.txt"
 	frankFile := "frankFile.txt"
 	graceFile := "graceFile.txt"
-	// horaceFile := "horaceFile.txt"
-	// iraFile := "iraFile.txt"
+	horaceFile := "horaceFile.txt"
+	iraFile := "iraFile.txt"
 
 	BeforeEach(func() {
 		// This runs before each test within this Describe block (including nested tests).
@@ -682,5 +684,327 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).ToNot(BeNil())
 		})
 
+		Specify("My Test: Comprehensive", func() {
+			aliceDesktop, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+			aliceLaptop, err = client.GetUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = aliceDesktop.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+			err = aliceLaptop.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err := aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+
+			data, err = aliceLaptop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+
+			bobPhone, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := aliceLaptop.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bobPhone.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			bobLaptop, err = client.GetUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = bobLaptop.AppendToFile(bobFile, []byte(contentThree))
+			Expect(err).To(BeNil())
+
+			data, err = bobLaptop.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+
+			data, err = bobPhone.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+
+			data, err = aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+
+			data, err = aliceLaptop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+
+			err = bobLaptop.StoreFile(bobFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			data, err = bobLaptop.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			data, err = bobPhone.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			data, err = aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			data, err = aliceLaptop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			err = aliceLaptop.RevokeAccess(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			_, err = bobLaptop.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = bobPhone.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			newUUIDNS := aliceLaptop.Namespace[aliceFile].UUIDStart
+			newUUIDSH := aliceLaptop.ShareStructs[aliceFile].FileUUID
+			Expect(newUUIDNS == newUUIDSH).To(BeTrue())
+
+			oldUUIDSH := bobLaptop.ShareStructs[bobFile].FileUUID
+			Expect(newUUIDNS == oldUUIDSH).To(BeFalse())
+
+			_, ok := userlib.DatastoreGet(oldUUIDSH)
+			Expect(ok).To(BeFalse())
+		})
+
+		Specify("My Test: Share-Revoke", func() {
+			aliceDesktop, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = aliceDesktop.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bobPhone, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := aliceDesktop.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bobPhone.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			data, err := bobPhone.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			err = aliceDesktop.RevokeAccess(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			_, err = bobPhone.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			err = bobPhone.AppendToFile(bobFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			data, err = aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+		})
+
+		Specify("My Test: Recipient should not be able to access the file until they call AcceptInvitation", func() {
+			aliceDesktop, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = aliceDesktop.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bobPhone, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := aliceDesktop.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			_, err = bobPhone.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			err = bobPhone.AppendToFile(bobFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			_, err = bobPhone.LoadFile(aliceFile)
+			Expect(err).ToNot(BeNil())
+
+			err = bobPhone.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			data, err := bobPhone.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			err = bobPhone.AppendToFile(bobFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err = bobPhone.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+
+			err = aliceDesktop.RevokeAccess(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			_, err = bobPhone.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			err = bobPhone.AppendToFile(bobFile, []byte(contentThree))
+			Expect(err).ToNot(BeNil())
+
+			data, err = aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+		})
+
+		Specify("My Test: Big share tree", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			frank, err = client.InitUser("frank", defaultPassword)
+			Expect(err).To(BeNil())
+
+			charles, err = client.InitUser("charles", defaultPassword)
+			Expect(err).To(BeNil())
+
+			doris, err = client.InitUser("doris", defaultPassword)
+			Expect(err).To(BeNil())
+
+			eve, err = client.InitUser("eve", defaultPassword)
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			bobPhone, err = client.GetUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			grace, err = client.InitUser("grace", defaultPassword)
+			Expect(err).To(BeNil())
+
+			horace, err = client.InitUser("horace", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "frank")
+			Expect(err).To(BeNil())
+
+			err = frank.AcceptInvitation("alice", invite, frankFile)
+			Expect(err).To(BeNil())
+
+			invite, err = alice.CreateInvitation(aliceFile, "charles")
+			Expect(err).To(BeNil())
+
+			err = charles.AcceptInvitation("alice", invite, charlesFile)
+			Expect(err).To(BeNil())
+
+			invite, err = alice.CreateInvitation(aliceFile, "doris")
+			Expect(err).To(BeNil())
+
+			err = doris.AcceptInvitation("alice", invite, dorisFile)
+			Expect(err).To(BeNil())
+
+			invite, err = alice.CreateInvitation(aliceFile, "eve")
+			Expect(err).To(BeNil())
+
+			err = eve.AcceptInvitation("alice", invite, eveFile)
+			Expect(err).To(BeNil())
+
+			invite, err = frank.CreateInvitation(frankFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.AcceptInvitation("frank", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			invite, err = frank.CreateInvitation(frankFile, "grace")
+			Expect(err).To(BeNil())
+
+			err = grace.AcceptInvitation("frank", invite, graceFile)
+			Expect(err).To(BeNil())
+
+			invite, err = eve.CreateInvitation(eveFile, "horace")
+			Expect(err).To(BeNil())
+
+			err = horace.AcceptInvitation("eve", invite, horaceFile)
+			Expect(err).To(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "frank")
+			Expect(err).To(BeNil())
+
+			_, err = frank.LoadFile(frankFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = bob.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = bobPhone.LoadFile(bobFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = grace.LoadFile(graceFile)
+			Expect(err).ToNot(BeNil())
+
+			data, err := charles.LoadFile(charlesFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			data, err = doris.LoadFile(dorisFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			data, err = eve.LoadFile(eveFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			data, err = horace.LoadFile(horaceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			err = horace.AppendToFile(horaceFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err = charles.LoadFile(charlesFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+
+			ira, err = client.InitUser("ira", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err = horace.CreateInvitation(horaceFile, "ira")
+			Expect(err).To(BeNil())
+
+			err = ira.AcceptInvitation("horace", invite, iraFile)
+			Expect(err).To(BeNil())
+			err = ira.AppendToFile(iraFile, []byte(contentThree))
+			Expect(err).To(BeNil())
+
+			data, err = charles.LoadFile(charlesFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+
+			err = alice.RevokeAccess(aliceFile, "eve")
+			Expect(err).To(BeNil())
+
+			_, err = eve.LoadFile(eveFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = horace.LoadFile(horaceFile)
+			Expect(err).ToNot(BeNil())
+
+			_, err = ira.LoadFile(iraFile)
+			Expect(err).ToNot(BeNil())
+
+			data, err = doris.LoadFile(dorisFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			data, err = doris.LoadFile(dorisFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+		})
 	})
 })

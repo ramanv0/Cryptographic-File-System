@@ -1459,13 +1459,21 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	if err != nil {
 		return err
 	}
-
+	shareData.ShareStructsSet = newShareStructsSetUUID
 	// need to get the start node, delete it from its curr uuid, and store it at a new uuid
 	// when going through the child share structs, update their FileUUIDs as well. Also need to change current code to always use the Share struct
 	// instead of ShareStructValues of user struct (because if we update the share struct below and use the ShareStructValues map to get the FileUUID,
 	// they will be out of sync).
 
+	userlib.DatastoreDelete(shareStructsValue.ShareStructPairUUID)
 	newOwnerShareUUID := uuid.New()
+	shareStructsValue.ShareStructPairUUID = newOwnerShareUUID
+	userdata.ShareStructs[filename] = shareStructsValue
+	err = storeShareStruct(shareStructsValue, shareData, shareStructsValue.ShareStructPairUUID)
+	if err != nil {
+		return err
+	}
+
 	for _, childShareStructSetValue := range shareStructSet.ShareStructSet {
 		storedShareDataBytes, ok := userlib.DatastoreGet(childShareStructSetValue.ChildUUID)
 		if !ok {
@@ -1543,7 +1551,10 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 
 	userlib.DatastoreSet(newFileUUID, startNodeStructBytes)
 
-	updateShareStructTree(shareStructsValue, shareData, newFileUUID)
+	err = updateShareStructTree(shareStructsValue, shareData, newFileUUID, shareStructsValue.ShareStructPairUUID)
+	if err != nil {
+		return err
+	}
 
 	fileMetadataNS := userdata.Namespace[filename]
 	fileMetadataNS.UUIDStart = newFileUUID
@@ -1651,10 +1662,10 @@ func storeShareStruct(shareStructsValue ShareStructsValue, shareData Share, stor
 }
 
 func updateShareStructTree(shareStructsValue ShareStructsValue, shareData Share,
-	newFileUUID uuid.UUID) error {
+	newFileUUID uuid.UUID, shareDataUUID uuid.UUID) error {
 
 	shareData.FileUUID = newFileUUID
-	storeShareStruct(shareStructsValue, shareData, shareStructsValue.ShareStructPairUUID)
+	storeShareStruct(shareStructsValue, shareData, shareDataUUID)
 
 	shareStructSetPtr, err := getShareStructSet(shareStructsValue, shareData)
 	if err != nil {
@@ -1667,7 +1678,7 @@ func updateShareStructTree(shareStructsValue ShareStructsValue, shareData Share,
 		if err != nil {
 			return err
 		}
-		err = updateShareStructTree(shareStructsValue, *childShareDataPtr, newFileUUID)
+		err = updateShareStructTree(shareStructsValue, *childShareDataPtr, newFileUUID, childShareStructSetValue.ChildUUID)
 		if err != nil {
 			return err
 		}
