@@ -427,6 +427,9 @@ var _ = Describe("Client Tests", func() {
 
 			_, err = alice.CreateInvitation(aliceFile, "bob")
 			Expect(err).ToNot(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
 		})
 
 		Specify("My Test: recipientUsername does not exist", func() {
@@ -521,6 +524,19 @@ var _ = Describe("Client Tests", func() {
 			before := userlib.DatastoreGetBandwidth()
 			alice.AppendToFile(aliceFile+"0", []byte(garbageStr))
 			after := userlib.DatastoreGetBandwidth()
+
+			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
+
+			aliceDesktop, err = client.GetUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			for i := 100; i < 200; i++ {
+				aliceDesktop.StoreFile(aliceFile+strconv.Itoa(i), []byte("A"))
+			}
+
+			before = userlib.DatastoreGetBandwidth()
+			aliceDesktop.AppendToFile(aliceFile+"100", []byte(garbageStr))
+			after = userlib.DatastoreGetBandwidth()
 
 			Expect(after).To(BeNumerically("~", before+(len(garbageStr)+2907), 500))
 		})
@@ -658,6 +674,177 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).ToNot(BeNil())
 		})
 
+		Specify("My Test: InitUser when an empty password is provided (should work)", func() {
+			alice, err = client.InitUser("alice", "")
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			aliceDesktop, err = client.GetUser("alice", "")
+			Expect(err).To(BeNil())
+
+			err = aliceDesktop.AppendToFile(aliceFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err := aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+		})
+
+		Specify("My Test: Ensure info is not leaked", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			datastoreMap := userlib.DatastoreGetMap()
+			for _, valBytes := range datastoreMap {
+				Expect(valBytes).NotTo(Equal([]byte(defaultPassword)))
+				Expect(valBytes).NotTo(Equal([]byte(contentOne)))
+				Expect(valBytes).NotTo(Equal([]byte(aliceFile)))
+				Expect(len(valBytes)).NotTo(Equal(len([]byte(aliceFile))))
+			}
+		})
+
+		Specify("My Test: Empty filenames should work", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile("", []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			data, err := alice.LoadFile("")
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			aliceDesktop, err = client.GetUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = aliceDesktop.AppendToFile("", []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err = aliceDesktop.LoadFile("")
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne + contentTwo)))
+		})
+
+		Specify("My Test: Different users can have files with the same filename", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			data, err := alice.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = bob.StoreFile(aliceFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err = bob.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentTwo)))
+		})
+
+		Specify("My Test: user already has a file with the chosen filename in their personal file namespace", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.StoreFile(bobFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).ToNot(BeNil())
+
+			bobLaptop, err = client.GetUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = bobLaptop.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).ToNot(BeNil())
+
+			data, err := bob.LoadFile(bobFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentTwo)))
+		})
+
+		Specify("My Test: Something about the invitationPtr is wrong", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			datastoreMap := userlib.DatastoreGetMap()
+			for uuidKey, _ := range datastoreMap {
+				if uuidKey == invite {
+					userlib.DatastoreSet(uuidKey, []byte("Overwritten with garbage bytes!!!"))
+				}
+			}
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: The given filename is not currently shared with recipientUsername", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: Revocation cannot be completed due to malicious action", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			datastoreMap := userlib.DatastoreGetMap()
+			for uuidKey, _ := range datastoreMap {
+				userlib.DatastoreSet(uuidKey, []byte("Overwritten with garbage bytes!!!"))
+			}
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).ToNot(BeNil())
+		})
+
 		Specify("My Test: GetUser when there is no initialized user for the given username.", func() {
 			_, err := client.GetUser("alice", defaultPassword)
 			Expect(err).ToNot(BeNil())
@@ -681,6 +868,81 @@ var _ = Describe("Client Tests", func() {
 			}
 
 			_, err = client.GetUser("alice", defaultPassword)
+			Expect(err).ToNot(BeNil())
+		})
+
+		Specify("My Test: Usernames are case sensitive", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			aliceCapital, err := client.InitUser("Alice", defaultPassword)
+			Expect(err).To(BeNil())
+			err = aliceCapital.StoreFile(aliceFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			aliceDesktop, err = client.GetUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+			data, err := aliceDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentOne)))
+
+			aliceCapitalDesktop, err := client.GetUser("Alice", defaultPassword)
+			Expect(err).To(BeNil())
+			data, err = aliceCapitalDesktop.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentTwo)))
+		})
+
+		Specify("My Test: Revoked user adversary", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+			err = alice.StoreFile(aliceFile+"new", []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.AppendToFile(bobFile, []byte(contentTwo))
+			Expect(err).ToNot(BeNil())
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).ToNot(BeNil())
+
+			charles, err = client.InitUser("charles", defaultPassword)
+			Expect(err).To(BeNil())
+
+			_, err = bob.CreateInvitation(bobFile, "charles")
+			Expect(err).ToNot(BeNil())
+
+			invite, err = alice.CreateInvitation(aliceFile+"new", "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.AcceptInvitation("alice", invite, bobFile+"new")
+			Expect(err).To(BeNil())
+
+			data, err := bob.LoadFile(bobFile + "new")
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentTwo)))
+		})
+
+		Specify("My Test: GetUser using wrong password", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			aliceDesktop, err = client.GetUser("alice", "")
 			Expect(err).ToNot(BeNil())
 		})
 
