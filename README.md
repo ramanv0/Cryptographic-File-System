@@ -13,7 +13,7 @@ The client is implemented in Golang and offers a suite of features including:
 - Revoke access to previously shared files
 
 ## Data Structures
-```
+```go
 type User struct {
 	Username              string
 	Password              string
