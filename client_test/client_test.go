@@ -1,12 +1,9 @@
 package client_test
 
-// You MUST NOT change these default imports.  ANY additional imports may
-// break the autograder and everyone will be sad.
-
 import (
-	// Some imports use an underscore to prevent the compiler from complaining
-	// about unused imports.
+	"bytes"
 	_ "encoding/hex"
+	"encoding/json"
 	_ "errors"
 
 	"strconv"
@@ -14,9 +11,6 @@ import (
 	_ "strings"
 	"testing"
 
-	// A "dot" import is used here so that the functions in the ginko and gomega
-	// modules can be used without an identifier. For example, Describe() and
-	// Expect() instead of ginko.Describe() and gomega.Expect().
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -30,25 +24,13 @@ func TestSetupAndExecution(t *testing.T) {
 	RunSpecs(t, "Client Tests")
 }
 
-// ================================================
-// Global Variables (feel free to add more!)
-// ================================================
 const defaultPassword = "password"
 const emptyString = ""
 const contentOne = "Bitcoin is Nick's favorite "
 const contentTwo = "digital "
 const contentThree = "cryptocurrency!"
 
-// ================================================
-// Describe(...) blocks help you organize your tests
-// into functional categories. They can be nested into
-// a tree-like structure.
-// ================================================
-
 var _ = Describe("Client Tests", func() {
-
-	// A few user declarations that may be used for testing. Remember to initialize these before you
-	// attempt to use them!
 	var alice *client.User
 	var bob *client.User
 	var charles *client.User
@@ -59,7 +41,7 @@ var _ = Describe("Client Tests", func() {
 	var horace *client.User
 	var ira *client.User
 
-	// These declarations may be useful for multi-session testing.
+	// Declarations for multi-session testing.
 	var alicePhone *client.User
 	var aliceLaptop *client.User
 	var aliceDesktop *client.User
@@ -68,7 +50,6 @@ var _ = Describe("Client Tests", func() {
 
 	var err error
 
-	// A bunch of filenames that may be useful.
 	aliceFile := "aliceFile.txt"
 	bobFile := "bobFile.txt"
 	charlesFile := "charlesFile.txt"
@@ -80,9 +61,6 @@ var _ = Describe("Client Tests", func() {
 	iraFile := "iraFile.txt"
 
 	BeforeEach(func() {
-		// This runs before each test within this Describe block (including nested tests).
-		// Here, we reset the state of Datastore and Keystore so that tests do not interfere with each other.
-		// We also initialize
 		userlib.DatastoreClear()
 		userlib.KeystoreClear()
 	})
@@ -455,7 +433,8 @@ var _ = Describe("Client Tests", func() {
 			invite, err := bob.CreateInvitation(bobFile, "alice")
 			Expect(err).To(BeNil())
 
-			bob.RevokeAccess(bobFile, "alice")
+			err = bob.RevokeAccess(bobFile, "alice")
+			Expect(err).To(BeNil())
 
 			err = alice.AcceptInvitation("bob", invite, aliceFile)
 			Expect(err).ToNot(BeNil())
@@ -1257,6 +1236,77 @@ var _ = Describe("Client Tests", func() {
 			data, err = doris.LoadFile(dorisFile)
 			Expect(err).To(BeNil())
 			Expect(data).To(Equal([]byte(contentOne)))
+
+			err = doris.StoreFile(dorisFile, []byte(contentTwo))
+			Expect(err).To(BeNil())
+
+			data, err = charles.LoadFile(charlesFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentTwo)))
+		})
+
+		Specify("My Test: Test what gets stored", func() {
+			mapBefore := userlib.DatastoreGetMap()
+
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			mapAfter := userlib.DatastoreGetMap()
+
+			var newVals [][]byte
+
+			for key, val := range mapAfter {
+				if _, exists := mapBefore[key]; !exists {
+					newVals = append(newVals, mapAfter[key])
+				} else if oldVal, _ := mapBefore[key]; !bytes.Equal(oldVal, val) {
+					newVals = append(newVals, val)
+				}
+			}
+
+			aliceBytes, err := json.Marshal(alice)
+			Expect(err).To(BeNil())
+
+			for _, newVal := range newVals {
+				Expect(bytes.Equal(aliceBytes, newVal)).To(BeFalse())
+				Expect(bytes.Contains(newVal, []byte(contentOne))).To(BeFalse())
+				Expect(bytes.Contains(newVal, []byte(aliceFile))).To(BeFalse())
+				Expect(bytes.Contains(newVal, []byte(defaultPassword))).To(BeFalse())
+				Expect(bytes.Contains(newVal, []byte(alice.PasswordHash))).To(BeFalse())
+				Expect(bytes.Contains(newVal, []byte(alice.Username))).To(BeFalse())
+			}
+		})
+
+		Specify("My Test: Check new start uuid after revoke", func() {
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			err = alice.StoreFile(aliceFile, []byte(contentOne))
+			Expect(err).To(BeNil())
+
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			invite, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			err = bob.AcceptInvitation("alice", invite, bobFile)
+			Expect(err).To(BeNil())
+
+			newStartUUID := alice.Namespace[aliceFile].UUIDStart
+			oldStartUUID := bob.ShareStructs[bobFile].FileUUID
+
+			Expect(newStartUUID == oldStartUUID).To(BeTrue())
+
+			err = alice.RevokeAccess(aliceFile, "bob")
+			Expect(err).To(BeNil())
+
+			newStartUUID = alice.Namespace[aliceFile].UUIDStart
+			oldStartUUID = bob.ShareStructs[bobFile].FileUUID
+
+			Expect(newStartUUID == oldStartUUID).To(BeFalse())
 		})
 	})
 })
